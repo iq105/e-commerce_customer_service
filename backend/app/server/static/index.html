@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>小X客服</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; background: #f5f5f5; }
+  #app { max-width: 720px; margin: 20px auto; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); overflow: hidden; }
+  #header { padding: 16px; background: #1677ff; color: #fff; font-weight: 600; }
+  #messages { height: 60vh; overflow-y: auto; padding: 16px; }
+  .msg { margin-bottom: 12px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .msg .bubble { max-width: 75%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .msg.user .bubble { background: #1677ff; color: #fff; }
+  .msg.assistant .bubble { background: #f0f0f0; color: #333; }
+  .msg.system .bubble { background: #fff7e6; color: #874d00; font-size: 13px; }
+  #hint { padding: 4px 16px; color: #999; font-size: 12px; min-height: 20px; }
+  #input-area { display: flex; padding: 12px; border-top: 1px solid #eee; gap: 8px; }
+  #input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+  button { padding: 10px 20px; background: #1677ff; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  button:disabled { background: #ccc; }
+  .interrupt-box { margin: 12px 0; padding: 12px; background: #fff7e6; border: 1px solid #ffd591; border-radius: 8px; }
+  .interrupt-box button { margin-right: 8px; background: #fa8c16; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">小X客服（WebSocket 版）</div>
+  <div id="messages"></div>
+  <div id="hint"></div>
+  <div id="input-area">
+    <input id="input" placeholder="输入消息..." autofocus />
+    <button id="send">发送</button>
+  </div>
+</div>
+
+<script>
+const userId = "u_" + Math.floor(Math.random() * 10000);
+const sessionId = "s_" + Date.now();
+const ws = new WebSocket(`ws://${location.host}/ws/${userId}/${sessionId}`);
+
+const messagesEl = document.getElementById("messages");
+const hintEl = document.getElementById("hint");
+const inputEl = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+
+let currentMsgId = null;
+let currentBubble = null;
+
+function appendMessage(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  div.appendChild(bubble);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function renderInterrupt(value) {
+  const div = document.createElement("div");
+  div.className = "interrupt-box";
+  const itype = value.type;
+
+  let html = "";
+  if (itype === "user_confirm") {
+    html = `<div>【等待用户确认】${value.question || ""}</div>
+            <div>订单: ${value.order_id} 金额: ${value.amount}</div>
+            <button data-v='{"confirmed":true}'>确认</button>
+            <button data-v='{"confirmed":false}'>取消</button>`;
+  } else if (itype === "human_approval") {
+    html = `<div>【等待人工审批】${value.assignee || ""}</div>
+            <div>订单: ${value.order_id} 金额: ${value.amount}</div>
+            <button data-v='{"approved":true}'>通过</button>
+            <button data-v='{"approved":false}'>拒绝</button>`;
+  } else {
+    html = `<div>${JSON.stringify(value)}</div>
+            <button data-v='null'>继续</button>`;
+  }
+  div.innerHTML = html;
+
+  div.querySelectorAll("button").forEach(btn => {
+    btn.onclick = () => {
+      const v = JSON.parse(btn.dataset.v);
+      ws.send(JSON.stringify({ type: "resume", value: v }));
+      div.remove();
+    };
+  });
+
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderStaticInterrupt(next) {
+  const div = document.createElement("div");
+  div.className = "interrupt-box";
+  div.innerHTML = `<div>⏸ 图暂停在: ${next.join(", ")}</div>
+                   <button id="static-continue">继续执行</button>`;
+  div.querySelector("#static-continue").onclick = () => {
+    ws.send(JSON.stringify({ type: "resume", value: null }));
+    div.remove();
+  };
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+ws.onopen = () => {
+  hintEl.textContent = "已连接";
+};
+
+ws.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+
+  if (data.type === "token") {
+    if (data.msg_id !== currentMsgId) {
+      currentMsgId = data.msg_id;
+      currentBubble = appendMessage("assistant", "");
+    }
+    currentBubble.textContent += data.content;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  else if (data.type === "assistant_message") {
+    appendMessage("assistant", data.content);
+    currentMsgId = null;
+    currentBubble = null;
+  }
+
+  else if (data.type === "node") {
+    hintEl.textContent = data.hint || "";
+  }
+
+  else if (data.type === "interrupt") {
+    renderInterrupt(data.value);
+    hintEl.textContent = "";
+  }
+
+  else if (data.type === "static_interrupt") {
+    renderStaticInterrupt(data.next);
+  }
+
+  else if (data.type === "done") {
+    currentMsgId = null;
+    currentBubble = null;
+    hintEl.textContent = "";
+  }
+
+  else if (data.type === "error") {
+    appendMessage("system", "⚠️ " + data.message);
+  }
+
+  else if (data.type === "ready") {
+    console.log("thread_id:", data.thread_id);
+  }
+};
+
+function send() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+  appendMessage("user", text);
+  ws.send(JSON.stringify({ type: "user_message", content: text }));
+  inputEl.value = "";
+}
+
+sendBtn.onclick = send;
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+</script>
+</body>
+</html>
